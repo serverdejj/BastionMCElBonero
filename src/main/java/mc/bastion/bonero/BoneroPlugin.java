@@ -17,7 +17,7 @@ import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.profile.PlayerProfile;
+import com.destroystokyo.paper.profile.PlayerProfile;
 import org.bukkit.profile.PlayerTextures;
 
 import java.io.File;
@@ -187,7 +187,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
                 try {
                     URL url = new URL(skin);
                     if (!url.getHost().equalsIgnoreCase("textures.minecraft.net")) throw new IllegalArgumentException("Solo textures.minecraft.net");
-                    PlayerProfile p = Bukkit.createPlayerProfile(UUID.randomUUID(), "ElBonero");
+                    PlayerProfile p = Bukkit.createProfile(UUID.randomUUID(), "ElBonero");
                     PlayerTextures t = p.getTextures(); t.setSkin(url); p.setTextures(t);
                     m.setProfile(ResolvableProfile.resolvableProfile(p));
                 } catch (Exception e) { getLogger().warning("Skin no válida: " + e.getMessage()); }
