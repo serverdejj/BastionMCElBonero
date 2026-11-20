@@ -1,0 +1,15 @@
+name: BastionMCElBonero
+version: 1.0.0
+main: mc.bastion.bonero.BoneroPlugin
+api-version: '1.21.11'
+author: BASTION MC
+commands:
+  elbonero:
+    description: Administración de El Bonero
+    permission: elbonero.admin
+  bonero:
+    description: Recargar El Bonero
+    permission: elbonero.admin
+permissions:
+  elbonero.admin:
+    default: op

@@ -1,0 +1,29 @@
+bonero:
+  name: '&#FFAA00&lEL BONERO'
+  respawn-minutes: 120
+  duration-minutes: 5
+  avoid-last-location: true
+  world-allowed: []
+  skin:
+    # Una URL de textures.minecraft.net/texture/... (no un PNG local)
+    texture-url: ''
+  hologram:
+    enabled: true
+    timer: '&#FF5555&l⏳ DESAPARECE EN &f{time}'
+    height-name: 2.45
+    height-timer: 2.76
+  announcements:
+    manual-spawn: true
+    spawn-sound:
+      enabled: true
+      type: ENTITY_ENDER_DRAGON_GROWL
+      volume: 1.0
+      pitch: 1.0
+    despawn-sound:
+      enabled: true
+      type: ENTITY_ENDERMAN_TELEPORT
+      volume: 1.0
+      pitch: 0.8
+    last-minute-warning: true
+  trades:
+    stock-enabled: true
