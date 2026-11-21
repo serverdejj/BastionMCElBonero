@@ -53,6 +53,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         messages = YamlConfiguration.loadConfiguration(messagesFile);
         state = YamlConfiguration.loadConfiguration(stateFile);
         marker = new NamespacedKey(this, "bonero_entity");
+        migrateLocations();
         Objects.requireNonNull(getCommand("elbonero")).setExecutor(this);
         Objects.requireNonNull(getCommand("elbonero")).setTabCompleter(this);
         Objects.requireNonNull(getCommand("bonero")).setExecutor(this);
@@ -138,7 +139,42 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         for (String id : sec.getKeys(false)) try { list.add(Integer.parseInt(id)); } catch (NumberFormatException ignored) { }
         Collections.sort(list); return list;
     }
-    private Location location(int id) { return locations.getLocation("locations." + id); }
+    private Location location(int id) {
+        String path = "locations." + id;
+        Object raw = locations.get(path);
+        // Compatibilidad con el formato antiguo de Bukkit Location.
+        if (raw instanceof Location old) return old;
+        ConfigurationSection sec = locations.getConfigurationSection(path);
+        if (sec == null) return null;
+        // Se admite el formato anterior serializado por Bukkit y el nuevo formato explícito.
+        String worldName = sec.getString("world");
+        if (worldName == null || worldName.isBlank()) return null;
+        World world = Bukkit.getWorld(worldName);
+        if (world == null) {
+            getLogger().warning("La ubicación " + id + " pertenece a un mundo no cargado: " + worldName);
+            return null;
+        }
+        if (!sec.isSet("x") || !sec.isSet("y") || !sec.isSet("z")) return null;
+        return new Location(world, sec.getDouble("x"), sec.getDouble("y"), sec.getDouble("z"),
+            (float) sec.getDouble("yaw", 0), (float) sec.getDouble("pitch", 0));
+    }
+    private void storeLocation(int id, Location l) {
+        String base = "locations." + id;
+        locations.set(base, null);
+        locations.set(base + ".world", l.getWorld().getName());
+        locations.set(base + ".x", l.getX());
+        locations.set(base + ".y", l.getY());
+        locations.set(base + ".z", l.getZ());
+        locations.set(base + ".yaw", l.getYaw());
+        locations.set(base + ".pitch", l.getPitch());
+        save(locations, locationsFile);
+    }
+    private void migrateLocations() {
+        // Leer y migrar todos los puntos antiguos una sola vez al formato explícito.
+        for (int id : ids()) {
+            if (locations.get("locations." + id) instanceof Location old) storeLocation(id, old);
+        }
+    }
     private void tick() {
         long now = System.currentTimeMillis();
         if (!npcReady) return;
@@ -328,10 +364,13 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         if (announce) announce("despawn", "despawn-sound");
     }
     private void reloadAll() {
+        // Guardar el estado de los puntos antes de recargar; no se restauran valores vacíos del JAR.
+        save(locations, locationsFile);
         reloadConfig();
         locations = YamlConfiguration.loadConfiguration(locationsFile);
         trades = YamlConfiguration.loadConfiguration(tradesFile);
         messages = YamlConfiguration.loadConfiguration(messagesFile);
+        migrateLocations();
         if (expires > 0 && npcReady) {
             clearNpc();
             Location l = location(locationId);
@@ -340,14 +379,19 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     }
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission("elbonero.admin")) { tell(sender, "&cSin permiso."); return true; }
-        if (label.equalsIgnoreCase("bonero")) {
-            if (args.length == 1 && args[0].equalsIgnoreCase("reload")) { reloadAll(); tell(sender, msg("reloaded")); }
-            else tell(sender, "&e/bonero reload");
+        // El comando registrado es estable aunque se use /plugin:bonero o /plugin:elbonero.
+        if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
+            reloadAll();
+            tell(sender, msg("reloaded"));
+            return true;
+        }
+        if (command.getName().equalsIgnoreCase("bonero")) {
+            tell(sender, "&e/bonero reload");
             return true;
         }
         if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
             tell(sender, "&6&lEL BONERO &7- Comandos");
-            for (String s : List.of("/elbonero set location <id>", "/elbonero spawn location <id>", "/elbonero remove location <id>", "/elbonero locations", "/elbonero edit trade", "/elbonero status", "/elbonero despawn", "/bonero reload")) tell(sender, "&e" + s);
+            for (String s : List.of("/elbonero set location <id>", "/elbonero spawn location <id>", "/elbonero remove location <id>", "/elbonero locations", "/elbonero edit trade", "/elbonero status", "/elbonero despawn", "/elbonero reload", "/bonero reload")) tell(sender, "&e" + s);
             return true;
         }
         String a = args[0].toLowerCase(Locale.ROOT);
@@ -368,7 +412,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             catch (NumberFormatException e) { tell(sender, "&cID inválido (1-1000)."); return true; }
             if (a.equals("set")) {
                 if (!(sender instanceof Player p)) { tell(sender, "&cSolo jugadores."); return true; }
-                locations.set("locations." + id, p.getLocation()); save(locations, locationsFile);
+                storeLocation(id, p.getLocation());
                 tell(sender, msg("location-set").replace("{id}", String.valueOf(id)));
             } else if (a.equals("remove")) {
                 if (location(id) == null) { tell(sender, msg("invalid-location")); return true; }
@@ -389,7 +433,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     @Override public List<String> onTabComplete(CommandSender sender, Command cmd, String alias, String[] a) {
         if (!sender.hasPermission("elbonero.admin")) return List.of();
         if (cmd.getName().equalsIgnoreCase("bonero")) return a.length == 1 ? prefix(List.of("reload"), a[0]) : List.of();
-        if (a.length == 1) return prefix(List.of("help","set","spawn","remove","locations","edit","status","despawn"), a[0]);
+        if (a.length == 1) return prefix(List.of("help","set","spawn","remove","locations","edit","status","despawn","reload"), a[0]);
         if (a.length == 2 && List.of("set","spawn","remove").contains(a[0].toLowerCase(Locale.ROOT))) return prefix(List.of("location"), a[1]);
         if (a.length == 2 && a[0].equalsIgnoreCase("edit")) return prefix(List.of("trade"), a[1]);
         if (a.length == 3 && a[1].equalsIgnoreCase("location")) return prefix(a[0].equalsIgnoreCase("set") ? List.of("1","2","3","4","5","6","7") : ids().stream().map(String::valueOf).toList(), a[2]);
