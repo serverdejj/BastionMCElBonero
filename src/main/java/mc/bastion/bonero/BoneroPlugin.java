@@ -241,7 +241,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             Chunk ch = l.getChunk(); ch.load(); ch.addPluginChunkTicket(this); chunkTicket = ch;
             NpcData data = new NpcData("bastion_elbonero", UUID.fromString("4c6e7e9e-9fc1-4c4a-b8bd-67131d44aa24"), l);
             // El nombre lo dibujan nuestros hologramas configurables.
-            data.setDisplayName("@none");
+            data.setDisplayName("");
             data.setCollidable(false);
             data.setTurnToPlayer(getConfig().getBoolean("bonero.look-at-players", true));
             data.setOnClick(player -> Bukkit.getScheduler().runTask(this, () -> {
