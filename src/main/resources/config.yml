@@ -5,8 +5,10 @@ bonero:
   avoid-last-location: true
   world-allowed: []
   skin:
-    # Una URL de textures.minecraft.net/texture/... (no un PNG local)
-    texture-url: ''
+    # file = utiliza plugins/BastionMCElBonero/elbonero.png; steve = predeterminado
+    # También acepta un nombre de Minecraft o URL de skin
+    source: file
+  look-at-players: true
   hologram:
     enabled: true
     timer: '&#FF5555&l⏳ DESAPARECE EN &f{time}'

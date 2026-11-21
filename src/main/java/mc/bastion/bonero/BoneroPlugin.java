@@ -1,6 +1,8 @@
 package mc.bastion.bonero;
 
-import io.papermc.paper.datacomponent.item.ResolvableProfile;
+import de.oliver.fancynpcs.api.FancyNpcsPlugin;
+import de.oliver.fancynpcs.api.Npc;
+import de.oliver.fancynpcs.api.NpcData;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.*;
@@ -12,16 +14,14 @@ import org.bukkit.event.*;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.inventory.*;
+import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
-import com.destroystokyo.paper.profile.PlayerProfile;
-import org.bukkit.profile.PlayerTextures;
 
 import java.io.File;
-import java.net.URL;
 import java.util.*;
 import java.util.regex.*;
 
@@ -30,12 +30,14 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private File locationsFile, tradesFile, messagesFile, stateFile;
     private final Random random = new Random();
     private NamespacedKey marker;
-    private Mannequin npc;
+    private Npc npc;
+    private boolean npcReady;
     private TextDisplay nameDisplay, timerDisplay;
     private Chunk chunkTicket;
     private long nextSpawn, expires;
     private int locationId = -1, lastLocation = -1;
     private boolean warningSent;
+    private long lastOrphanSweep;
     private final Map<UUID, Integer> editors = new HashMap<>();
     private static final Pattern HEX = Pattern.compile("&#([0-9a-fA-F]{6})");
     private static final int[] TRADE_SLOTS = {10,11,12,13,14,15,16,19,20,21,22,23,24,25,28,29,30,31,32,33,34,37,38,39,40,41,42,43};
@@ -54,21 +56,29 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         Objects.requireNonNull(getCommand("bonero")).setExecutor(this);
         Objects.requireNonNull(getCommand("bonero")).setTabCompleter(this);
         getServer().getPluginManager().registerEvents(this, this);
-        // The old NPC is never reused across reloads; only plugin-marked entities are removed.
-        for (World w : Bukkit.getWorlds()) for (Entity e : w.getEntities())
-            if (e.getPersistentDataContainer().has(marker, PersistentDataType.BYTE)) e.remove();
+        // Remove orphaned holograms left by an older version, but NEVER touch other plugins' displays.
+        // ChunkLoadEvent also handles holograms in chunks that were unloaded during startup.
+        cleanupOrphanDisplays();
         nextSpawn = state.getLong("next-spawn", System.currentTimeMillis() + interval());
         expires = state.getLong("expires", 0);
         locationId = state.getInt("active-location", -1);
         lastLocation = state.getInt("last-location", -1);
         long now = System.currentTimeMillis();
-        if (expires > now && locationId > 0 && location(locationId) != null) {
-            createNpc(location(locationId));
-        } else {
+        if (expires <= now || locationId <= 0 || location(locationId) == null) {
             expires = 0; locationId = -1;
             if (nextSpawn <= 0) nextSpawn = now + interval();
         }
         persist();
+        // FancyNpcs recomienda esperar al menos 10 segundos tras arrancar el servidor.
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            npcReady = true;
+            if (expires > System.currentTimeMillis() && locationId > 0) {
+                if (!createNpc(location(locationId))) {
+                    getLogger().warning("No se pudo restaurar El Bonero. Se reintentará en el siguiente ciclo.");
+                    expires = 0; locationId = -1; nextSpawn = System.currentTimeMillis() + 30000L; persist();
+                }
+            }
+        }, 220L);
         Bukkit.getScheduler().runTaskTimer(this, this::tick, 20L, 20L);
     }
 
@@ -129,13 +139,23 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private Location location(int id) { return locations.getLocation("locations." + id); }
     private void tick() {
         long now = System.currentTimeMillis();
+        if (!npcReady) return;
+        if (expires <= 0 && now - lastOrphanSweep >= 30000L) {
+            cleanupOrphanDisplays();
+            lastOrphanSweep = now;
+        }
         if (expires > 0) {
             if (now >= expires) { despawn(true); return; }
-            if (npc == null || !npc.isValid()) {
+            if (npc == null) {
                 Location l = location(locationId);
-                if (l != null) createNpc(l);
+                if (l == null || !createNpc(l)) {
+                    getLogger().warning("El Bonero no pudo restaurarse; cancelando evento para evitar hologramas fantasmas.");
+                    despawn(false);
+                    return;
+                }
             }
-            if (timerDisplay != null && timerDisplay.isValid()) timerDisplay.text(component(apply(getConfig().getString("bonero.hologram.timer", "&c{time}"))));
+            // Use the saved expiry epoch (not a separate countdown) so it never drifts.
+            updateTimer();
             if (!warningSent && expires - now <= 60000 && getConfig().getBoolean("bonero.announcements.last-minute-warning", true)) {
                 warningSent = true;
                 for (String line : messages.getStringList("warning")) Bukkit.broadcast(component(apply(line)));
@@ -161,41 +181,58 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private void spawnAt(int id, boolean announce) {
         Location l = location(id);
         if (l == null || l.getWorld() == null) return;
+        if (!npcReady) { getLogger().warning("FancyNpcs todavía está iniciándose. Reintenta en unos segundos."); return; }
         clearNpc();
+        cleanupOrphanDisplays();
         locationId = id; lastLocation = id;
         expires = System.currentTimeMillis() + duration();
         warningSent = false;
-        createNpc(l);
+        if (!createNpc(l)) {
+            expires = 0; locationId = -1;
+            nextSpawn = System.currentTimeMillis() + 30000L;
+            persist();
+            return;
+        }
         persist();
         if (announce) announce("spawn", "spawn-sound");
     }
-    private void createNpc(Location l) {
-        if (npc != null && npc.isValid()) return;
-        Chunk ch = l.getChunk(); ch.load(); ch.addPluginChunkTicket(this); chunkTicket = ch;
-        npc = l.getWorld().spawn(l, Mannequin.class, m -> {
-            mark(m);
-            m.setImmovable(true);
-            m.setInvulnerable(true);
-            m.setSilent(true);
-            m.setPersistent(false);
-            m.setRemoveWhenFarAway(false);
-            m.customName(component(getConfig().getString("bonero.name", "&6EL BONERO")));
-            m.setCustomNameVisible(false);
-            m.setDescription(Component.empty());
-            String skin = getConfig().getString("bonero.skin.texture-url", "").trim();
-            if (!skin.isEmpty()) {
-                try {
-                    URL url = new URL(skin);
-                    if (!url.getHost().equalsIgnoreCase("textures.minecraft.net")) throw new IllegalArgumentException("Solo textures.minecraft.net");
-                    PlayerProfile p = Bukkit.createProfile(UUID.randomUUID(), "ElBonero");
-                    PlayerTextures t = p.getTextures(); t.setSkin(url); p.setTextures(t);
-                    m.setProfile(ResolvableProfile.resolvableProfile(p));
-                } catch (Exception e) { getLogger().warning("Skin no válida: " + e.getMessage()); }
+    private boolean createNpc(Location l) {
+        if (npc != null) return true;
+        if (l == null || l.getWorld() == null) return false;
+        try {
+            Chunk ch = l.getChunk(); ch.load(); ch.addPluginChunkTicket(this); chunkTicket = ch;
+            NpcData data = new NpcData("bastion_elbonero", UUID.fromString("4c6e7e9e-9fc1-4c4a-b8bd-67131d44aa24"), l);
+            // El nombre lo dibujan nuestros hologramas configurables.
+            data.setDisplayName("<gray> </gray>");
+            data.setCollidable(false);
+            data.setTurnToPlayer(getConfig().getBoolean("bonero.look-at-players", true));
+            data.setOnClick(player -> Bukkit.getScheduler().runTask(this, () -> {
+                if (expires > System.currentTimeMillis() && npc != null) list(player, false);
+            }));
+            String skin = getConfig().getString("bonero.skin.source", "file");
+            if (skin.equalsIgnoreCase("file")) {
+                File png = new File(getDataFolder(), "elbonero.png");
+                if (!png.exists()) saveResource("elbonero.png", false);
+                data.setSkin(png.getAbsolutePath());
+            } else if (!skin.isBlank() && !skin.equalsIgnoreCase("steve")) {
+                data.setSkin(skin); // Puede ser nombre de jugador, UUID o URL.
             }
-        });
-        if (getConfig().getBoolean("bonero.hologram.enabled", true)) {
-            nameDisplay = display(l.clone().add(0, getConfig().getDouble("bonero.hologram.height-name", 2.45), 0), getConfig().getString("bonero.name"));
-            timerDisplay = display(l.clone().add(0, getConfig().getDouble("bonero.hologram.height-timer", 2.76), 0), apply(getConfig().getString("bonero.hologram.timer", "&c{time}")));
+            Npc created = FancyNpcsPlugin.get().getNpcAdapter().apply(data);
+            created.setSaveToFile(false);
+            FancyNpcsPlugin.get().getNpcManager().registerNpc(created);
+            npc = created;
+            npc.create();
+            npc.spawnForAll();
+            if (getConfig().getBoolean("bonero.hologram.enabled", true)) {
+                nameDisplay = display(l.clone().add(0, getConfig().getDouble("bonero.hologram.height-name", 2.45), 0), getConfig().getString("bonero.name"));
+                timerDisplay = display(l.clone().add(0, getConfig().getDouble("bonero.hologram.height-timer", 2.76), 0), apply(getConfig().getString("bonero.hologram.timer", "&c{time}")));
+            }
+            updateTimer();
+            return true;
+        } catch (Exception ex) {
+            getLogger().log(java.util.logging.Level.SEVERE, "No se pudo crear el NPC FancyNpcs", ex);
+            clearNpc();
+            return false;
         }
     }
     private TextDisplay display(Location l, String text) {
@@ -206,11 +243,48 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         });
     }
     private void mark(Entity e) { e.getPersistentDataContainer().set(marker, PersistentDataType.BYTE, (byte)1); }
+
+    private void updateTimer() {
+        if (timerDisplay != null && timerDisplay.isValid()) {
+            long seconds = Math.max(0L, (expires - System.currentTimeMillis() + 999L) / 1000L);
+            String template = getConfig().getString("bonero.hologram.timer", "&c{time}");
+            timerDisplay.text(component(template.replace("{time}", format(seconds))));
+        }
+    }
+
+    // Only our own PDC-marked entities qualify. FancyHolograms and other NPC displays are untouched.
+    private boolean isCurrentDisplay(Entity e) {
+        return (nameDisplay != null && nameDisplay.getUniqueId().equals(e.getUniqueId()))
+            || (timerDisplay != null && timerDisplay.getUniqueId().equals(e.getUniqueId()));
+    }
+    private void cleanupOrphanDisplays(Iterable<? extends Entity> entities) {
+        for (Entity e : entities) {
+            if (e instanceof TextDisplay && !isCurrentDisplay(e)
+                    && e.getPersistentDataContainer().has(marker, PersistentDataType.BYTE)) {
+                e.remove();
+            }
+        }
+    }
+    private void cleanupOrphanDisplays() {
+        for (World w : Bukkit.getWorlds()) cleanupOrphanDisplays(w.getEntities());
+    }
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChunkLoad(ChunkLoadEvent event) {
+        // Wait one tick so newly loaded entities are visible to Bukkit's entity list.
+        Bukkit.getScheduler().runTask(this, () -> cleanupOrphanDisplays(Arrays.asList(event.getChunk().getEntities())));
+    }
+
     private void clearNpc() {
-        if (npc != null) npc.remove();
-        if (nameDisplay != null) nameDisplay.remove();
-        if (timerDisplay != null) timerDisplay.remove();
+        if (npc != null) {
+            try {
+                npc.removeForAll();
+                FancyNpcsPlugin.get().getNpcManager().removeNpc(npc);
+            } catch (Exception ex) { getLogger().warning("Error al retirar NPC: " + ex.getMessage()); }
+        }
+        if (nameDisplay != null && nameDisplay.isValid()) nameDisplay.remove();
+        if (timerDisplay != null && timerDisplay.isValid()) timerDisplay.remove();
         npc = null; nameDisplay = null; timerDisplay = null;
+        cleanupOrphanDisplays();
         if (chunkTicket != null) { chunkTicket.removePluginChunkTicket(this); chunkTicket = null; }
     }
     private void despawn(boolean announce) {
@@ -225,7 +299,11 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         locations = YamlConfiguration.loadConfiguration(locationsFile);
         trades = YamlConfiguration.loadConfiguration(tradesFile);
         messages = YamlConfiguration.loadConfiguration(messagesFile);
-        if (expires > 0) { clearNpc(); Location l = location(locationId); if (l != null) createNpc(l); else despawn(false); }
+        if (expires > 0 && npcReady) {
+            clearNpc();
+            Location l = location(locationId);
+            if (l == null || !createNpc(l)) despawn(false);
+        } else cleanupOrphanDisplays();
     }
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission("elbonero.admin")) { tell(sender, "&cSin permiso."); return true; }
@@ -245,7 +323,11 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             tell(sender, expires > 0 ? "&aActivo en ubicación " + locationId + " | Restan " + format((expires-System.currentTimeMillis()+999)/1000) : "&eSiguiente aparición en " + format(Math.max(0,(nextSpawn-System.currentTimeMillis()+999)/1000)));
             return true;
         }
-        if (a.equals("despawn")) { if (expires > 0) { despawn(true); tell(sender, msg("removed")); } else tell(sender, "&cNo está activo."); return true; }
+        if (a.equals("despawn")) {
+            if (expires > 0) { despawn(true); tell(sender, msg("removed")); }
+            else { clearNpc(); cleanupOrphanDisplays(); tell(sender, "&eSe revisaron y limpiaron los hologramas huérfanos del plugin."); }
+            return true;
+        }
         if (a.equals("edit") && args.length >= 2 && args[1].equalsIgnoreCase("trade") && sender instanceof Player p) { editorList(p); return true; }
         if (List.of("set", "spawn", "remove").contains(a) && args.length >= 3 && args[1].equalsIgnoreCase("location")) {
             int id;
@@ -264,7 +346,8 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
                 if (location(id) == null) { tell(sender, msg("invalid-location")); return true; }
                 if (expires > 0) { tell(sender, msg("already-active")); return true; }
                 spawnAt(id, getConfig().getBoolean("bonero.announcements.manual-spawn", true));
-                tell(sender, msg("spawned").replace("{id}", String.valueOf(id)));
+                if (expires > 0) tell(sender, msg("spawned").replace("{id}", String.valueOf(id)));
+                else tell(sender, "&cNo se pudo generar EL BONERO. Revisa la consola.");
             }
             return true;
         }
@@ -341,17 +424,6 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         p.openInventory(inv);
     }
     private ItemStack cloneOrNull(ItemStack i) { return i == null ? null : i.clone(); }
-    @EventHandler(ignoreCancelled = true) public void onClickNpc(PlayerInteractEntityEvent e) {
-        if (e.getHand() == EquipmentSlot.HAND && npc != null && e.getRightClicked().getUniqueId().equals(npc.getUniqueId())) {
-            e.setCancelled(true); if (expires > System.currentTimeMillis()) list(e.getPlayer(), false);
-        }
-    }
-    @EventHandler(ignoreCancelled = true) public void onDamage(EntityDamageEvent e) {
-        if (e.getEntity().getPersistentDataContainer().has(marker, PersistentDataType.BYTE)) e.setCancelled(true);
-    }
-    @EventHandler public void onDeath(EntityDeathEvent e) {
-        if (e.getEntity().getPersistentDataContainer().has(marker, PersistentDataType.BYTE)) { e.getDrops().clear(); e.setDroppedExp(0); }
-    }
     @EventHandler public void onInventoryClick(InventoryClickEvent e) {
         if (!(e.getView().getTopInventory().getHolder() instanceof BoneroHolder h)) return;
         if (!(e.getWhoClicked() instanceof Player p)) return;

@@ -1,6 +1,7 @@
 name: BastionMCElBonero
-version: 1.0.0
+version: 1.2.0
 main: mc.bastion.bonero.BoneroPlugin
+depend: [FancyNpcs]
 api-version: '1.21.11'
 author: BASTION MC
 commands:
