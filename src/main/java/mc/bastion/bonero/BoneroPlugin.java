@@ -211,9 +211,19 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             }));
             String skin = getConfig().getString("bonero.skin.source", "file");
             if (skin.equalsIgnoreCase("file")) {
-                File png = new File(getDataFolder(), "elbonero.png");
-                if (!png.exists()) saveResource("elbonero.png", false);
-                data.setSkin(png.getAbsolutePath());
+                // FancyNpcs resolves local skins by file name inside its own skins/ directory.
+                // An absolute path in our plugin folder throws SkinLoadException.
+                File skinsFolder = new File(getDataFolder().getParentFile(), "FancyNpcs/skins");
+                if (!skinsFolder.exists() && !skinsFolder.mkdirs()) {
+                    throw new java.io.IOException("No se pudo crear " + skinsFolder.getAbsolutePath());
+                }
+                File targetSkin = new File(skinsFolder, "bastion_elbonero.png");
+                // Ensure the built-in skin exists, copying from the plugin JAR when needed.
+                File localSkin = new File(getDataFolder(), "elbonero.png");
+                if (!localSkin.exists()) saveResource("elbonero.png", false);
+                java.nio.file.Files.copy(localSkin.toPath(), targetSkin.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                data.setSkin(targetSkin.getName());
             } else if (!skin.isBlank() && !skin.equalsIgnoreCase("steve")) {
                 data.setSkin(skin); // Puede ser nombre de jugador, UUID o URL.
             }
