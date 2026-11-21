@@ -250,7 +250,23 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private TextDisplay display(Location l, String text) {
         return l.getWorld().spawn(l, TextDisplay.class, e -> {
             mark(e); e.setPersistent(false); e.setBillboard(Display.Billboard.CENTER);
-            e.setShadowed(false); e.setSeeThrough(false); e.setDefaultBackground(false);
+            String base = "bonero.hologram.";
+            e.setShadowed(getConfig().getBoolean(base + "text-shadow", false));
+            e.setSeeThrough(getConfig().getBoolean(base + "see-through", false));
+            e.setDefaultBackground(false);
+            // TextDisplay keeps its own semi-opaque rectangle unless its ARGB
+            // background is explicitly made fully transparent (alpha = 0).
+            int alpha = Math.max(0, Math.min(255, getConfig().getInt(base + "background-opacity", 0)));
+            String hex = getConfig().getString(base + "background-color", "#000000");
+            try {
+                String clean = hex == null ? "000000" : hex.strip().replaceFirst("^#", "");
+                if (!clean.matches("[0-9a-fA-F]{6}")) throw new IllegalArgumentException("HEX inválido");
+                int rgb = Integer.parseInt(clean, 16);
+                e.setBackgroundColor(Color.fromARGB(alpha, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255));
+            } catch (IllegalArgumentException error) {
+                getLogger().warning("Color de fondo de holograma inválido: " + hex + "; usando transparente.");
+                e.setBackgroundColor(Color.fromARGB(0, 0, 0, 0));
+            }
             e.text(component(text));
         });
     }

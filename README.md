@@ -54,3 +54,8 @@ La skin `elbonero.png` (64x64) está incluida **como referencia** pero Minecraft
 - El spawn manual no informa éxito si la creación del NPC falló.
 
 **Importante:** si quedan hologramas de una versión antigua sin etiqueta PDC o de otro plugin, no se borran automáticamente para proteger hologramas ajenos. Para limpiar la versión anterior, primero haz una copia de seguridad y prueba la versión 1.2. No elimines la carpeta de datos del plugin al actualizar.
+
+
+## v1.5 Holograma configurable
+
+En `config.yml` bajo `bonero.hologram` se aceptan `background-opacity` (0 a 255, `0` es completamente transparente), `background-color` (`#RRGGBB`), `text-shadow` (`false` elimina la sombra) y `see-through`. Estos cambios requieren `/bonero reload` o reiniciar para reconstruir los TextDisplay.
