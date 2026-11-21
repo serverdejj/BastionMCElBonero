@@ -3,6 +3,7 @@ package mc.bastion.bonero;
 import de.oliver.fancynpcs.api.FancyNpcsPlugin;
 import de.oliver.fancynpcs.api.Npc;
 import de.oliver.fancynpcs.api.NpcData;
+import io.papermc.paper.event.player.PlayerPurchaseEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.*;
@@ -39,6 +40,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private boolean warningSent;
     private long lastOrphanSweep;
     private final Map<UUID, Integer> editors = new HashMap<>();
+    private final Map<UUID, MerchantSession> merchantSessions = new HashMap<>();
     private static final Pattern HEX = Pattern.compile("&#([0-9a-fA-F]{6})");
     private static final int[] TRADE_SLOTS = {10,11,12,13,14,15,16,19,20,21,22,23,24,25,28,29,30,31,32,33,34,37,38,39,40,41,42,43};
 
@@ -207,7 +209,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             data.setCollidable(false);
             data.setTurnToPlayer(getConfig().getBoolean("bonero.look-at-players", true));
             data.setOnClick(player -> Bukkit.getScheduler().runTask(this, () -> {
-                if (expires > System.currentTimeMillis() && npc != null) list(player, false);
+                if (expires > System.currentTimeMillis() && npc != null) openMerchantShop(player);
             }));
             String skin = getConfig().getString("bonero.skin.source", "file");
             if (skin.equalsIgnoreCase("file")) {
@@ -248,7 +250,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private TextDisplay display(Location l, String text) {
         return l.getWorld().spawn(l, TextDisplay.class, e -> {
             mark(e); e.setPersistent(false); e.setBillboard(Display.Billboard.CENTER);
-            e.setShadowed(true); e.setSeeThrough(false); e.setDefaultBackground(false);
+            e.setShadowed(false); e.setSeeThrough(false); e.setDefaultBackground(false);
             e.text(component(text));
         });
     }
@@ -301,7 +303,12 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
         clearNpc(); expires = 0; locationId = -1;
         nextSpawn = System.currentTimeMillis() + interval();
         persist();
-        for (Player p : Bukkit.getOnlinePlayers()) if (p.getOpenInventory().getTopInventory().getHolder() instanceof BoneroHolder h && h.kind == Kind.SHOP) p.closeInventory();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (merchantSessions.containsKey(p.getUniqueId()) && p.getOpenInventory().getTopInventory().getType() == InventoryType.MERCHANT) {
+                p.closeInventory();
+            }
+        }
+        merchantSessions.clear();
         if (announce) announce("despawn", "despawn-sound");
     }
     private void reloadAll() {
@@ -374,11 +381,19 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     }
     private List<String> prefix(List<String> values, String p) { return values.stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(p.toLowerCase(Locale.ROOT))).toList(); }
 
-    private enum Kind { SHOP, LIST, EDIT }
+    private enum Kind { LIST, EDIT }
     private static final class BoneroHolder implements InventoryHolder {
         final Kind kind; final int tradeId; Inventory inventory;
         BoneroHolder(Kind kind, int tradeId) { this.kind = kind; this.tradeId = tradeId; }
         @Override public Inventory getInventory() { return inventory; }
+    }
+    private static final class MerchantSession {
+        final Merchant merchant;
+        final List<Integer> tradeIds;
+        MerchantSession(Merchant merchant, List<Integer> tradeIds) {
+            this.merchant = merchant;
+            this.tradeIds = tradeIds;
+        }
     }
     private Inventory inventory(Kind kind, int tradeId, int size, String title) {
         BoneroHolder h = new BoneroHolder(kind, tradeId);
@@ -401,7 +416,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
     private void editorList(Player p) { list(p, true); }
     private void list(Player p, boolean edit) {
         List<Integer> all = tradeIds();
-        Inventory inv = inventory(edit ? Kind.LIST : Kind.SHOP, -1, 54, messages.getString("gui."+(edit?"editor-title":"trade-title")));
+        Inventory inv = inventory(Kind.LIST, -1, 54, messages.getString("gui."+(edit?"editor-title":"trade-title")));
         int i = 0;
         for (int id : all) {
             if (i >= TRADE_SLOTS.length) break;
@@ -417,9 +432,45 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             meta.lore(lore); display.setItemMeta(meta);
             inv.setItem(TRADE_SLOTS[i++], display);
         }
-        if (edit) inv.setItem(49, button(Material.EMERALD_BLOCK, messages.getString("gui.add"), List.of("&7Crear un intercambio")));
+        inv.setItem(49, button(Material.EMERALD_BLOCK, messages.getString("gui.add"), List.of("&7Crear un intercambio")));
         p.openInventory(inv);
     }
+    private void openMerchantShop(Player p) {
+        if (expires <= System.currentTimeMillis()) {
+            tell(p, "&cEl Bonero no está activo en este momento.");
+            return;
+        }
+        List<MerchantRecipe> recipes = new ArrayList<>();
+        List<Integer> shownTradeIds = new ArrayList<>();
+        for (int id : tradeIds()) {
+            ItemStack reward = tradeItem(id, "reward");
+            if (reward == null || reward.getType().isAir()) continue;
+            int stock = stock(id);
+            if (stock == 0) continue;
+            MerchantRecipe recipe = new MerchantRecipe(reward.clone(), 0, stock > 0 ? stock : Integer.MAX_VALUE, false, 0, 0f);
+            recipe.setExperienceReward(false);
+            recipe.setVillagerExperience(0);
+            recipe.setPriceMultiplier(0f);
+            recipe.setIgnoreDiscounts(true);
+            List<ItemStack> ingredients = new ArrayList<>();
+            ItemStack a = tradeItem(id, "price1"), b = tradeItem(id, "price2");
+            if (a != null && !a.getType().isAir()) ingredients.add(a.clone());
+            if (b != null && !b.getType().isAir()) ingredients.add(b.clone());
+            if (ingredients.isEmpty()) continue;
+            recipe.setIngredients(ingredients);
+            recipes.add(recipe);
+            shownTradeIds.add(id);
+        }
+        if (recipes.isEmpty()) {
+            tell(p, msg("sold-out"));
+            return;
+        }
+        Merchant merchant = Bukkit.createMerchant(component(messages.getString("gui.trade-title", "EL BONERO | Intercambios")));
+        merchant.setRecipes(recipes);
+        merchantSessions.put(p.getUniqueId(), new MerchantSession(merchant, shownTradeIds));
+        p.openMerchant(merchant, true);
+    }
+
     private void edit(Player p, int id) {
         Inventory inv = inventory(Kind.EDIT, id, 27, messages.getString("gui.edit-trade-title"));
         for (int slot = 0; slot < 27; slot++) inv.setItem(slot, button(Material.GRAY_STAINED_GLASS_PANE, "&7", List.of()));
@@ -474,7 +525,7 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
                 trades.set("trades."+id, null); save(trades,tradesFile);
                 Bukkit.getScheduler().runTask(this, () -> editorList(p));
             } else Bukkit.getScheduler().runTask(this, () -> edit(p,id));
-        } else if (h.kind == Kind.SHOP && expires > System.currentTimeMillis()) purchase(p,id);
+        }
     }
     @EventHandler public void onInventoryDrag(InventoryDragEvent e) {
         if (!(e.getView().getTopInventory().getHolder() instanceof BoneroHolder h)) return;
@@ -482,42 +533,36 @@ public final class BoneroPlugin extends JavaPlugin implements Listener, TabExecu
             if (slot < e.getView().getTopInventory().getSize()) { e.setCancelled(true); return; }
         }
     }
-    private boolean same(ItemStack a, ItemStack b) {
-        return a != null && b != null && a.isSimilar(b);
-    }
-    private int count(Player p, ItemStack item) {
-        int total=0; for (ItemStack slot : p.getInventory().getStorageContents()) if (same(slot,item)) total += slot.getAmount();
-        return total;
-    }
-    private void deduct(Player p, ItemStack item) {
-        if (item == null) return;
-        int remaining = item.getAmount();
-        ItemStack[] contents = p.getInventory().getStorageContents();
-        for (int i=0;i<contents.length && remaining>0;i++) {
-            ItemStack slot=contents[i]; if (!same(slot,item)) continue;
-            int take = Math.min(remaining,slot.getAmount()); remaining-=take;
-            if (take==slot.getAmount()) contents[i]=null;
-            else { slot=slot.clone();slot.setAmount(slot.getAmount()-take);contents[i]=slot; }
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent e) {
+        if (e.getPlayer() instanceof Player p && e.getView().getTopInventory().getType() == InventoryType.MERCHANT) {
+            merchantSessions.remove(p.getUniqueId());
         }
-        p.getInventory().setStorageContents(contents);
     }
-    private void purchase(Player p, int id) {
-        if (stock(id)==0) { tell(p,msg("sold-out")); return; }
-        ItemStack a=tradeItem(id,"price1"), b=tradeItem(id,"price2"), reward=tradeItem(id,"reward");
-        if (reward==null) return;
-        // If both prices refer to the same item, their quantities are summed.
-        int needA = a == null ? 0 : a.getAmount() + (same(a,b)?b.getAmount():0);
-        if ((a!=null && count(p,a)<needA) || (b!=null && !same(a,b) && count(p,b)<b.getAmount())) { tell(p,msg("not-enough")); return; }
-        // Simulate removing the price before testing capacity, so exchanges can free slots.
-        ItemStack[] original = p.getInventory().getStorageContents();
-        deduct(p,a); deduct(p,b);
-        HashMap<Integer,ItemStack> leftover = p.getInventory().addItem(reward.clone());
-        if (!leftover.isEmpty()) {
-            p.getInventory().setStorageContents(original);
-            tell(p,msg("inventory-full")); return;
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPlayerPurchase(PlayerPurchaseEvent e) {
+        MerchantSession session = merchantSessions.get(e.getPlayer().getUniqueId());
+        if (session == null || session.merchant != e.getMerchant()) return;
+        int index = session.merchant.getRecipes().indexOf(e.getTrade());
+        if (index < 0 || index >= session.tradeIds.size()) return;
+        int id = session.tradeIds.get(index);
+        if (stock(id) == 0) {
+            e.setCancelled(true);
+            tell(e.getPlayer(), msg("sold-out"));
+            return;
         }
-        if (stock(id)>0) { trades.set("trades."+id+".stock", stock(id)-1);save(trades,tradesFile); }
-        tell(p,msg("bought"));
-        Bukkit.getScheduler().runTask(this, () -> { if (p.isOnline() && expires > 0) list(p,false); });
+        if (stock(id) > 0) {
+            trades.set("trades." + id + ".stock", stock(id) - 1);
+            save(trades, tradesFile);
+        }
+        tell(e.getPlayer(), msg("bought"));
+        Bukkit.getScheduler().runTask(this, () -> {
+            Player p = e.getPlayer();
+            if (!p.isOnline()) return;
+            MerchantSession current = merchantSessions.get(p.getUniqueId());
+            if (current == null || current.merchant != e.getMerchant()) return;
+            if (expires > System.currentTimeMillis()) openMerchantShop(p);
+        });
     }
 }
